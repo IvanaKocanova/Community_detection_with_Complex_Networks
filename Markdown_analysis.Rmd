@@ -1,0 +1,280 @@
+---
+title: "Urban_mobility"
+author: "Ivana Kocanova"
+date: "23/08/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+To better understand urban life, this research aims to construct networks utilizing travel-flow data. Using latest research of complex networks, we plan to uncover inherent community structure within city of Leeds. We believe these findings could be beneficial for urban planners, infrastructure maintenance and epidemic outbreak management.
+
+### Exploring Origin-Destionation flows 
+
+We begin by loading the Origin-destination flows and linking them with spatial information loaded through shapefiles. 
+
+```{r, echo = TRUE, warning = FALSE}
+# Required packages
+library(sf)
+library(stplanr)
+library(leaflet)
+library(tmap)
+library(dplyr)
+library(igraph)
+library(ggraph)
+tmap_mode("view")
+
+# Load the Origin-Destination (OD) flows
+flows <- read.csv("data\\2011_census_flows.csv")
+
+# Load Ward names lookup dataset
+wards <-
+  read.csv("data//Leeds_MSOA_Ward_LookUp.csv")
+
+# Read in shapefile containing MSOA boundaries
+boundaries <-
+  sf::read_sf(
+    "data//boundaries//Middle_Layer_Super_Output_Areas_December_2011_Super_Generalised_Clipped_Boundaries_in_England_and_Wales.shp"
+  )
+
+# Filter boundaries for Leeds 
+leeds_boundaries <- boundaries %>%
+  filter(stringr::str_detect(msoa11nm, 'Leeds')) %>%
+  st_transform(boundaries, crs = 27700)
+
+# Add ward names 
+leeds_OD_matrix <- flows %>% 
+  left_join(wards %>%  select(msoa, ward_name), by = c("origin" = "msoa")) %>% 
+  rename("origin_ward" = "ward_name") %>% 
+  left_join(wards %>%  select(msoa, ward_name), by = c("destination" = "msoa")) %>% 
+  rename("destination_ward" = "ward_name")
+
+# Add the geometry information for MSOA's
+leeds_OD_matrix <- leeds_OD_matrix %>%
+  left_join(leeds_boundaries %>% select(msoa11cd, geometry),
+            by = c("origin" = "msoa11cd")) %>%
+  rename("geometry_origin" = "geometry") %>%  
+  left_join(leeds_boundaries %>% select(msoa11cd, geometry),
+          by = c("destination" = "msoa11cd")) %>%
+  rename("geometry_destination" = "geometry")
+
+rm(leeds_boundaries)
+```
+
+### Which areas are losing/gaining population throughout the day
+The following section examines which areas of Leeds experience population inflows or outflows. Having such insight can be valuable for infrastructure planners or city councils to effectively distribute resources.
+
+```{r, warning = FALSE}
+# Table of the most frequent origin wards
+o_table <- leeds_OD_matrix  %>%
+  group_by(origin_ward) %>%
+  summarize(o_count = n()) %>%
+  arrange(desc(o_count))
+
+# Table of the most frequent destination wards
+d_table <- leeds_OD_matrix %>%
+  group_by(destination_ward) %>%
+  summarize(d_count = n()) %>%
+  arrange(desc(d_count))
+
+# Create a table which deducts the count of origins from destinations 
+final_table <- o_table %>% left_join(d_table, by = c("origin_ward" = "destination_ward"))
+final_table$inflows_count <- final_table$d_count - final_table$o_count 
+
+# Display the table of inflows 
+final_table %>% 
+  select(origin_ward,inflows_count) %>% 
+  arrange(desc(inflows_count))
+
+```
+
+The table above shows that the Burmantofts and Richmond Hill had 41 more recorded incoming flows than outflows. The areas with the highest outflows were Wetherby, Kippax and Methley, and Ardsley and Robin Hood.
+
+```{r, warning = FALSE}
+# Join inflows dataframe with wards 
+wards <- wards %>% left_join(final_table, by = c ("ward_name" = "origin_ward"))
+
+# Add spatial information about the wards
+wards <- wards %>% left_join(boundaries %>% select(msoa11cd, geometry), by = c("msoa" = "msoa11cd"))
+wards <- wards %>% st_sf(sf_column_name = "geometry")
+
+# Map of the inflows counts
+tm_shape(wards) +
+  tm_fill(col = "inflows_count", style = "jenks", midpoint = NA, alpha = 0.7, title = "Inflows count")+
+  tm_borders() + 
+  tm_basemap(server = "OpenStreetMap.BlackAndWhite")
+
+```
+
+The code above sums previously obtained table into heatmap highlighting how different areas of Leeds are affected by urban mobility. It can be observed that most inflows are consolidated around the centre and highest outflows are within Wetherby and south-east parts of the Leeds.
+
+### Estimating travel routes from OD flows
+Knowing where a journey began and ended we can estimate the most likely route taken. For example, a journey from Wetherby to Otley depicted as a straight line can be transformed into a traffic route as seen in the picture below.
+
+```{r pressure, echo=FALSE, fig.cap="Estimation of route taken between Wetherby and Otley", out.width = '100%'}
+knitr::include_graphics("maps\\Example_line2route.png")
+```
+
+Having calculated the routes with OSRM, the route network can be then visualized to show where the routes overlap each other. The darker colour shows a higher frequency of individuals movement and indicates places of possible traffic congestion.
+
+```{r, eval = FALSE , warning = FALSE}
+# This script estimates the fastest route to travel from origin to destination 
+# It can take quite a long time to run(4~5 hours) due to OSRM's limit on number of requests therefore 
+# the following part of analysis loads the already obtained results 
+
+# Calculate the centroids of MSOA's
+centroids <- boundaries %>%
+  st_transform(boundaries, crs = 27700) %>%
+  st_centroid()
+
+centroids <- 
+  st_transform(centroids, st_crs("+proj=longlat +datum=WGS84 +no_defs"))
+
+centroids <- centroids %>% dplyr::select(msoa11cd, geometry)
+
+# Drop flows which start and end in the same zone
+unique_flows <- flows[flows$origin != flows$destination,]
+unique_flows <- unique_flows %>% select(origin, destination)
+
+# Create lines from OD points
+lines <- od2line(flow = unique_flows, zones = centroids)
+lines <- st_transform(lines, st_crs("+proj=longlat +datum=WGS84"))
+
+# Calculate routes
+routes <- stplanr::line2route(l = lines, route_fun = route_osrm)
+
+# Add the population counts
+routes$total_pop <- unique_flows$total_pop
+```
+
+After calculating the estimated routes we create heatmap visualization of the overlapping routes. Such visualization helps to identify the roads which are most affected by urban mobility.
+
+```{r,  warning = FALSE}
+# Load the routes
+routes <- sf::read_sf("data\\routes_census\\census_routes.shp")
+freq_routes <- routes %>% 
+  filter(total_pop > 50)
+
+# Create a heat map of overlapping routes
+pal <-
+  leaflet::colorNumeric(palette = "YlOrRd", domain = freq_routes$total_pop)
+
+leaflet(data = freq_routes) %>%
+  addProviderTiles(providers$OpenStreetMap.BlackAndWhite) %>%
+  addPolylines(
+    weight = freq_routes$total_pop / 130,
+    color = ~ pal(total_pop),
+    opacity = 0.9
+  ) %>%
+  addLegend(pal = pal, values = ~ total_pop)
+```
+
+Apart from calculating the routes, the OSRM also provides estimates of the duration and distance of the routes.
+
+```{r, warning = FALSE}
+# Routes distance
+hist(routes$distance / 1000, # distance in meters is converted to km
+     main = "Histogram of routes distance",
+     xlab = "Distance in kilometers",
+     breaks = 50) 
+summary(routes$distance / 1000)
+```
+
+According to the histogram of routes distance, the majority of the trips were shorter than 20kms. The median travel distance was found to be 12.7kms and the average route distance was 13.9kms. The longest recorded route was 48.5kms long.  
+
+```{r, warning = FALSE}
+# Routes duration
+hist(routes$duration / 60, # duration in seconds is converted to mins
+      main = "Histogram of routes duration",
+     xlab = "Duration in minutes",
+     breaks = 50) 
+summary(routes$duration / 60)
+```
+
+In respect to the route duration, most of the trips were found to take less than 30 minutes.The average travel time in Leeds was found to be 23.5 mins with median value of 22.8 mins. The longest estimated route took 61.7 minutes.
+
+
+### Complex network analysis
+Many complex systems in nature and society can be described in terms of networks. The study of networks has been widely applied in many disciplines from social sciences, biology, neuroscience, mathematics or physics. Their use was found to be valuable also in the realm of transportation studies. From the graph theory perspective, we can interpret origins and destinations as nodes of the network which are linked by the flows of people. Higher the number of people exchanged between the nodes, stronger the bond between these nodes.
+
+```{r, echo=FALSE}
+# Create nodes list
+origins <- flows %>% 
+  distinct(origin) %>%
+  rename(label = origin)
+
+destins <- flows %>% 
+  distinct(destination)%>%
+  rename(label = destination)
+
+nodes <- full_join(origins,destins, by = "label")
+rm(origins, destins)
+
+nodes <- nodes %>% tibble::rowid_to_column("id")
+
+# Join nodes MSOA with ward names into one column
+nodes <- nodes %>% left_join(wards %>% select (ward_name, msoa), by = c("label" = "msoa"))
+
+# Add geometry information of the nodes
+nodes <- nodes %>% left_join(boundaries %>%  select(msoa11cd, geometry), by = c("label" = "msoa11cd"))
+```
+
+In order to construct a network, we need to create a list of nodes and edges with weights. As nodes are used distinct MSOA areas. The edge list is composed of variables source, target and weights. Source and target are representing origins and destinations ID's from the nodes lists. The weights depict the sum of individuals who have travelled between the origins and destinations.
+
+```{r, echo=FALSE}
+# Create edge list
+edges <- flows %>% 
+  left_join(nodes, by = c("origin" = "label")) %>% 
+  rename(Source = id)
+
+edges <- edges %>% 
+  left_join(nodes, by = c("destination" = "label")) %>% 
+  rename(Target = id)
+
+edges <- edges %>% select(Source, Target, total_pop) %>% rename(weight = total_pop)
+nodes <- tidyr::unite(nodes, label, c(label, ward_name), remove = TRUE)  
+edges
+
+# Create a network
+routes_network <- graph_from_data_frame(d = edges, vertices = nodes %>% select(id, label), directed = TRUE)
+```
+
+Having created the nodes and edge lists we can create a routes network. The network can be even exported in gexf format supported by Gephi.
+
+```{r, eval = FALSE}
+# Code for exporting network in Gephi format
+export <- rgexf::igraph.to.gexf(routes_network)
+rgexf::write.gexf(
+  output = 'census_geometry_network.gexf',
+  nodes = nodes %>% select(id, label),
+  edges = edges %>% select(Source, Target),
+  defaultedgetype = "directed",
+  edgesWeight = edges$weight)
+```
+
+Next section focuses on detecting a community structure present in the obtained network. 
+Walktrap function works by identifying densely connected subgraphs, also called communities in a graph via random walks. The idea is that short random walks tend to get trapped in the dense part of a network corresponding to communities as few edges are leading out.
+```{r}
+# Walktrap community detection
+random_walk_cls <-
+  cluster_walktrap(routes_network,
+                   weights = E(routes_network)$weight,
+                   steps = 5)
+
+# Add the cluster assignemnt to the nodes 
+nodes$walktrap <- random_walk_cls$membership
+nodes <- st_as_sf(nodes)
+
+# Create vizualization of the communities with OpenStreetMap
+tm_shape(nodes) +
+  tm_fill(col = "walktrap", title = "Walktrap communities", alpha = 0.7,style="cat",palette="Paired") +
+  tm_borders() + 
+  tm_basemap(server = "OpenStreetMap.BlackAndWhite")
+```
+ The Walktrap algorithm identified that Leeds consists of 7 homogeneous communities. The first and biggest community spreads from Harewood down to Kippax. This community represents the rural part of Leeds and therefore seems logical it occupies the largest area. The algorithm was also able to detect distinct smaller communities in Wetherby and Otley. The communities detected seem organic and provide an alternative view of urban life in Leeds.
+ 
+
+ 
