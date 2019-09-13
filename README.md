@@ -1,5 +1,7 @@
 # Community detection with Complex Networks
- 
-Understanding urban mobility patterns play a crucial role in the maintenance of infrastructure, city planning or disruptive events prevention. In my research at Leed Institute of Data Analytics, I have been investigating 2011 Census data and Telefonica Origin-Destination flows using Complex Network Analysis (CNA).
 
-This allows us to study the dynamics of the Leeds urban mobility system and to assess the resilience of complex transportation networks. Moreover, using Community detection methods like Walktrap we can define unique functional commuting zones.
+How we structure our cities is essential for resources allocation but also for understanding social and economic phenomena. It is however, unclear whether the administrative divisions, typically evolved decades ago, are taking into consideration actual social organization of cities. To provide an alternative view of urban life in Leeds, this project utilizes Complex Networks of urban flows for detection of functional commuting zones.
+
+This allows us to study the dynamics of the Leeds urban mobility system and to assess the resilience of complex transportation networks. Moreover, the detection of unique functional commuting zones could be benneficial for urban planners, infrastructure maintenance and epidemic outbreak management.
+
+This research has been supervised by Nik Lomax and Nicolas Malleson.
